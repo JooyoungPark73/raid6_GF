@@ -263,19 +263,3 @@ func (m matrix) gaussianElimination() error {
 	}
 	return nil
 }
-
-// Create a Vandermonde matrix, which is guaranteed to have the
-// property that any subset of rows that forms a square matrix
-// is invertible.
-func vandermonde(rows, cols int) (matrix, error) {
-	result, err := newMatrix(rows, cols)
-	if err != nil {
-		return nil, err
-	}
-	for r, row := range result {
-		for c := range row {
-			result[r][c] = galExp(byte(r), c)
-		}
-	}
-	return result, nil
-}
