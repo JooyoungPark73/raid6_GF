@@ -8,3 +8,13 @@ func StrToBin(s string) (binString string) {
 	}
 	return
 }
+
+func Print2DArray(name string, array [][]byte) {
+	fmt.Printf("%s:\n", name)
+	for _, row := range array {
+		for _, val := range row {
+			fmt.Printf("%x \t", val)
+		}
+		fmt.Println()
+	}
+}

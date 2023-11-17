@@ -7,21 +7,20 @@ import (
 )
 
 func main() {
-	r := raid6.BuildRaidSystem(6, 2)
+	r := raid6.BuildRaidSystem(3, 3)
 	fmt.Println()
 
-	data_string := "Singapore is a fine city!"
+	data_string := "abcdefghijklmnopqrstuvwxyz"
 	shards, length := r.Split(data_string)
-	fmt.Printf("Shards:\n")
-	for _, row := range shards {
-		for _, val := range row {
-			fmt.Print(string(val), "\t")
-		}
-		fmt.Println()
-	}
+	raid6.Print2DArray("Shards", shards)
 
-	output := r.Join(shards, length)
-	fmt.Printf("Output: %s \n", output)
 	r.Encode(shards)
+	r.DropShard(r.DiskArray, 3)
+	// r.CreateBitFlip(r.DiskArray, 4, 1)
+	// checkResult := r.Verify()
+	checkResult := r.DetectBrokenDisk()
+	fmt.Printf("Check Result: %v \n", checkResult)
 
+	output := r.Join(r.DiskArray, length)
+	fmt.Printf("Output: %s \n", output)
 }

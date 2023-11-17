@@ -1,7 +1,9 @@
 package raid6
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -10,9 +12,7 @@ type raid6 struct {
 	parityShards   int
 	totalShards    int
 	encodingMatrix matrix
-	diskArray      matrix
-	dataDisk       matrix
-	parityDisk     matrix
+	DiskArray      matrix
 }
 
 func buildMatrix(rows, cols int) matrix {
@@ -58,7 +58,7 @@ func fixedVandermond(rows, cols int) matrix {
 			}
 		}
 	}
-	fmt.Printf("Encoding matrix: %d \n", result)
+	Print2DArray("Fixed Vandermonde Matrix", result)
 	return result
 }
 
@@ -70,13 +70,9 @@ func BuildRaidSystem(dataShards, parityShards int) *raid6 {
 	}
 
 	r.encodingMatrix = fixedVandermond(r.totalShards, r.dataShards)
-	r.diskArray = buildMatrix(r.totalShards, 5000)
-	r.dataDisk = r.diskArray[:r.dataShards]
-	r.parityDisk = r.diskArray[r.dataShards:]
+	r.DiskArray = buildMatrix(r.totalShards, 5000)
 
-	fmt.Printf("Build Disk Array: %d, %d \n", len(r.diskArray), len(r.diskArray[0]))
-	fmt.Printf("Build Data Disk: %d, %d \n", len(r.dataDisk), len(r.dataDisk[0]))
-	fmt.Printf("Build Parity Disk: %d, %d \n", len(r.parityDisk), len(r.parityDisk[0]))
+	fmt.Printf("Build Disk Array: %d, %d \n", len(r.DiskArray), len(r.DiskArray[0]))
 
 	return &r
 }
@@ -88,14 +84,70 @@ func (r *raid6) Encode(shards [][]byte) {
 	// [--------------------]  *    [ data ]      =    [--------]
 	// [ vandermonde matrix ]       [      ]           [ parity ]
 
-	r.dataDisk, _ = r.encodingMatrix.Multiply(shards)
-	fmt.Printf("Data Disk:\n")
-	for _, row := range r.dataDisk {
-		for _, val := range row {
-			fmt.Print(string(val), "\t")
+	r.DiskArray, _ = r.encodingMatrix.Multiply(shards)
+	Print2DArray("Encoded Data Disk", r.DiskArray)
+}
+
+// Verify assumes error detected is the result of a bit flip
+// This function cannot detect erasure.
+// To detect erasure, we need to be notified which disk is corrupted.
+func (r *raid6) Verify() []bool {
+	// Compare each shard with encoded matrix of matrix to verify
+
+	calculated_shard, _ := r.encodingMatrix.Multiply(r.DiskArray[:r.dataShards])
+	calculated_shard = calculated_shard[r.dataShards:]
+	output := make([]bool, r.parityShards)
+
+	Print2DArray("Calculated Shard", calculated_shard)
+	Print2DArray("Disk Array", r.DiskArray)
+
+	for i, calculated := range calculated_shard {
+		if !bytes.Equal(calculated, r.DiskArray[i+r.dataShards]) {
+			output[i] = false
+		} else {
+			output[i] = true
 		}
-		fmt.Println()
 	}
+	return output
+}
+
+func (r *raid6) DetectBrokenDisk() []bool {
+	validDiskList := make([]bool, r.totalShards)
+	for i := 0; i < r.totalShards; i++ {
+		if r.DiskArray[i] != nil {
+			validDiskList[i] = true
+		} else {
+			validDiskList[i] = false
+		}
+	}
+	return validDiskList
+}
+
+func (r *raid6) Reconstruct(validDisks []bool) {
+	// Reconstruct data from parity shards
+	// First, we need to find the inverse of the encoding matrix
+	// We can do this by performing Gaussian elimination
+	// on the encoding matrix augmented with the identity matrix
+	// [ encoding_matrix(n+m, n) | identity_matrix(n+m, n) ] -> [ identity_matrix(n+m, n) | inverse_encoding_matrix(n+m, n) ]
+
+}
+
+func (r *raid6) CreateBitFlip(shards [][]byte, nShard int, nBit int) [][]byte {
+	// Create error in a specific shard
+	if shards[nShard] != nil {
+		shards[nShard][nBit] ^= 1
+		Print2DArray("CreateBitFlip", shards)
+	} else {
+		fmt.Printf("Shard %d is nil \n", nShard)
+	}
+	return shards
+}
+
+func (r *raid6) DropShard(shards [][]byte, nShard int) [][]byte {
+	// Create error in a specific shard
+	shards[nShard] = nil
+	Print2DArray("DropShard", shards)
+	return shards
 }
 
 // Split splits the input string into shards of equal length,
@@ -127,7 +179,11 @@ func (r *raid6) Join(shards [][]byte, length int) string {
 	var outputSlice []string
 
 	for _, v := range shards {
-		outputSlice = append(outputSlice, string(v))
+		if v == nil {
+			outputSlice = append(outputSlice, strings.Repeat("/", int(math.Ceil(float64(length)/float64(r.dataShards)))))
+		} else {
+			outputSlice = append(outputSlice, string(v))
+		}
 	}
 	outputString := strings.Join(outputSlice, "")
 	return outputString[:length]
