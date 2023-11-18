@@ -2,6 +2,7 @@ package raid6
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -15,18 +16,10 @@ type raid6 struct {
 	DiskArray      matrix
 }
 
-func buildMatrix(rows, cols int) matrix {
-	m := matrix(make([][]byte, rows))
-	for i := range m {
-		m[i] = make([]byte, cols)
-	}
-	return m
-}
-
 func fixedVandermond(rows, cols int) matrix {
 	// Generate a fixed Vandermonde matrix based on
 	// https://web.eecs.utk.edu/~jplank/plank/papers/CS-03-504.html
-	result := buildMatrix(rows, cols)
+	result, _ := newMatrix(rows, cols)
 
 	for r, row := range result {
 		for c := range row {
@@ -58,11 +51,14 @@ func fixedVandermond(rows, cols int) matrix {
 			}
 		}
 	}
-	Print2DArray("Fixed Vandermonde Matrix", result)
 	return result
 }
 
-func BuildRaidSystem(dataShards, parityShards int) *raid6 {
+func BuildRaidSystem(dataShards, parityShards int) (*raid6, error) {
+	if dataShards <= 0 || parityShards <= 0 {
+		return nil, errors.New("invalid data or parity shards")
+	}
+
 	r := raid6{
 		dataShards:   dataShards,
 		parityShards: parityShards,
@@ -70,11 +66,14 @@ func BuildRaidSystem(dataShards, parityShards int) *raid6 {
 	}
 
 	r.encodingMatrix = fixedVandermond(r.totalShards, r.dataShards)
-	r.DiskArray = buildMatrix(r.totalShards, 5000)
+	r.DiskArray, _ = newMatrix(r.totalShards, 5000)
 
 	fmt.Printf("Build Disk Array: %d, %d \n", len(r.DiskArray), len(r.DiskArray[0]))
+	fmt.Printf("Data Shards: %d \n", r.dataShards)
+	fmt.Printf("Parity Shards: %d \n", r.parityShards)
+	fmt.Println()
 
-	return &r
+	return &r, nil
 }
 
 func (r *raid6) Encode(shards [][]byte) {
@@ -85,30 +84,52 @@ func (r *raid6) Encode(shards [][]byte) {
 	// [ vandermonde matrix ]       [      ]           [ parity ]
 
 	r.DiskArray, _ = r.encodingMatrix.Multiply(shards)
-	Print2DArray("Encoded Data Disk", r.DiskArray)
 }
 
-// Verify assumes error detected is the result of a bit flip
-// This function cannot detect erasure.
-// To detect erasure, we need to be notified which disk is corrupted.
-func (r *raid6) Verify() []bool {
+func (r *raid6) Verify() ([]bool, matrix) {
+	// Verify assumes error detected is the result of a bit flip
+	// This function cannot detect erasure.
+	// To detect erasure, we need to be notified which disk is corrupted.
 	// Compare each shard with encoded matrix of matrix to verify
 
 	calculated_shard, _ := r.encodingMatrix.Multiply(r.DiskArray[:r.dataShards])
 	calculated_shard = calculated_shard[r.dataShards:]
 	output := make([]bool, r.parityShards)
 
-	Print2DArray("Calculated Shard", calculated_shard)
-	Print2DArray("Disk Array", r.DiskArray)
-
 	for i, calculated := range calculated_shard {
-		if !bytes.Equal(calculated, r.DiskArray[i+r.dataShards]) {
+		if r.DiskArray[i+r.dataShards] == nil {
+			output[i] = false
+		} else if !bytes.Equal(calculated, r.DiskArray[i+r.dataShards]) {
 			output[i] = false
 		} else {
 			output[i] = true
 		}
 	}
-	return output
+	return output, calculated_shard
+}
+
+func (r *raid6) ReconstructCorruption() error {
+	// Reconstruct parity from data shards
+	validParityList, calculated_parity := r.Verify()
+
+	nValidParity := 0
+	for _, v := range validParityList {
+		if v {
+			nValidParity++
+		}
+	}
+
+	if nValidParity == 0 {
+		return errors.New("possible data disk corruption. cannot recover from data corruption")
+	}
+
+	for i, calculated := range calculated_parity {
+		if !validParityList[i] {
+			r.DiskArray[i+r.dataShards] = calculated
+		}
+	}
+
+	return nil
 }
 
 func (r *raid6) DetectBrokenDisk() []bool {
@@ -123,31 +144,112 @@ func (r *raid6) DetectBrokenDisk() []bool {
 	return validDiskList
 }
 
-func (r *raid6) Reconstruct(validDisks []bool) {
+func (r *raid6) ReconstructDisk() error {
 	// Reconstruct data from parity shards
-	// First, we need to find the inverse of the encoding matrix
+
+	validDisks := r.DetectBrokenDisk()
+	if len(validDisks) < r.dataShards {
+		return errors.New("invalid valid disk list")
+	}
+
+	nValidDataDisks := 0
+	nValidParityDisks := 0
+	for i, v := range validDisks {
+		if v && i < r.dataShards {
+			nValidDataDisks++
+		} else if v && i >= r.dataShards {
+			nValidParityDisks++
+		}
+	}
+
+	if nValidDataDisks+nValidParityDisks < r.dataShards {
+		// Not enough valid disks to reconstruct data
+		return errors.New("not enough valid disks to reconstruct data")
+	} else if nValidDataDisks < r.dataShards {
+		// Data disk erasure detected
+		// Will reconstruct Parity disk too
+
+		err := r.ReconstructDataDisk(validDisks)
+		if err != nil {
+			return err
+		}
+		err = r.ReconstructCorruption()
+		return err
+	} else if nValidDataDisks == r.dataShards && nValidParityDisks < r.parityShards {
+		// only Parity disk erasure detected
+		err := r.ReconstructCorruption()
+		return err
+	} else if nValidDataDisks == r.dataShards && nValidParityDisks == r.parityShards {
+		return nil
+		// No disk erasure detected
+	} else {
+		return errors.New("invalid disk reconstruction condition")
+	}
+}
+
+func (r *raid6) ReconstructDataDisk(validDisks []bool) error {
+	// inverted_broken_encoding_matrix(n, n+m-b) * broken_data_shard(n+m,n) = data_matrix(n,n)
+	//     [   inverted encoding matrix  ]       *    [  broken_data  ]     =    [ data ]
+
+	// Pull intact disks from disk array, up to number of data shards
+	// We need to generate a subshard that contains only the intact disks
+	// Also build a square subEncodingMatrix that contains only the row with intact disks
+
+	subShards := make([][]byte, r.dataShards)
+	subEncodingMatrix, _ := newMatrix(r.dataShards, r.dataShards)
+	subMatrixRow := 0
+	for matrixRow := 0; matrixRow < r.totalShards && subMatrixRow < r.dataShards; matrixRow++ {
+		if validDisks[matrixRow] {
+			subShards[subMatrixRow] = r.DiskArray[matrixRow]
+			subEncodingMatrix[subMatrixRow] = r.encodingMatrix[matrixRow]
+			subMatrixRow++
+		}
+	}
+
+	// Next, we need to find the inverse of the encoding matrix
 	// We can do this by performing Gaussian elimination
 	// on the encoding matrix augmented with the identity matrix
-	// [ encoding_matrix(n+m, n) | identity_matrix(n+m, n) ] -> [ identity_matrix(n+m, n) | inverse_encoding_matrix(n+m, n) ]
+	// [ encoding_matrix | identity_matrix ] -> [ identity_matrix | inverse_encoding_matrix ]
 
-}
-
-func (r *raid6) CreateBitFlip(shards [][]byte, nShard int, nBit int) [][]byte {
-	// Create error in a specific shard
-	if shards[nShard] != nil {
-		shards[nShard][nBit] ^= 1
-		Print2DArray("CreateBitFlip", shards)
-	} else {
-		fmt.Printf("Shard %d is nil \n", nShard)
+	dataDecodeMatrix, err := subEncodingMatrix.Invert()
+	if err != nil {
+		return err
 	}
-	return shards
+	dataGenerated, err := dataDecodeMatrix.Multiply(subShards)
+	if err != nil {
+		return err
+	}
+
+	for i, v := range dataGenerated {
+		r.DiskArray[i] = v
+	}
+
+	return nil
 }
 
-func (r *raid6) DropShard(shards [][]byte, nShard int) [][]byte {
+func (r *raid6) CreateBitFlip(nShard int, nBit int) error {
 	// Create error in a specific shard
-	shards[nShard] = nil
-	Print2DArray("DropShard", shards)
-	return shards
+	if nShard >= len(r.DiskArray) || nBit >= len(r.DiskArray[nShard]) {
+		err := errors.New("invalid shard number or bit number")
+		return err
+	}
+	if r.DiskArray[nShard] != nil {
+		r.DiskArray[nShard][nBit] ^= 1
+		return nil
+	} else {
+		err := errors.New("cannot create bit flip in a nil shard")
+		return err
+	}
+}
+
+func (r *raid6) DropShard(nShard int) error {
+	// Create error in a specific shard
+	if nShard >= len(r.DiskArray) {
+		err := errors.New("invalid shard number")
+		return err
+	}
+	r.DiskArray[nShard] = nil
+	return nil
 }
 
 // Split splits the input string into shards of equal length,
@@ -160,7 +262,6 @@ func (r *raid6) Split(dataString string) ([][]byte, int) {
 		paddingLength = r.dataShards - length%r.dataShards
 		dataString += strings.Repeat("0", paddingLength)
 	}
-	fmt.Printf("Padded string: %s \n", dataString)
 	totalStringLength := length + paddingLength
 	splitStringLength := totalStringLength / r.dataShards
 
@@ -169,9 +270,6 @@ func (r *raid6) Split(dataString string) ([][]byte, int) {
 		end := i + splitStringLength
 		shards[i/splitStringLength] = []byte(dataString[i:end])
 	}
-
-	fmt.Printf("Split shards: %d, %d \n", len(shards), len(shards[0]))
-
 	return shards, length
 }
 

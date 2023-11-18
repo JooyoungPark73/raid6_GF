@@ -7,20 +7,47 @@ import (
 )
 
 func main() {
-	r := raid6.BuildRaidSystem(3, 3)
-	fmt.Println()
+	r, err := raid6.BuildRaidSystem(5, 5)
+	raid6.CheckErr(err)
 
-	data_string := "abcdefghijklmnopqrstuvwxyz"
+	data_string := "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+	fmt.Printf("Saved Output: \n%s \n\n", data_string)
 	shards, length := r.Split(data_string)
-	raid6.Print2DArray("Shards", shards)
 
 	r.Encode(shards)
-	r.DropShard(r.DiskArray, 3)
-	// r.CreateBitFlip(r.DiskArray, 4, 1)
-	// checkResult := r.Verify()
-	checkResult := r.DetectBrokenDisk()
-	fmt.Printf("Check Result: %v \n", checkResult)
+	r.PrintDiskString("Clean Disk Array", r.DiskArray)
 
+	err = r.DropShard(2)
+	raid6.CheckErr(err)
+	err = r.DropShard(3)
+	raid6.CheckErr(err)
+	err = r.DropShard(4)
+	raid6.CheckErr(err)
+	err = r.DropShard(7)
+	raid6.CheckErr(err)
+	err = r.DropShard(8)
+	raid6.CheckErr(err)
+	r.PrintDiskString("Erasure Disk Array", r.DiskArray)
+	corrupt_output := r.Join(r.DiskArray, length)
+	fmt.Printf("Corrupted Output: \n%s \n\n", corrupt_output)
+	err = r.ReconstructDisk()
+	raid6.CheckErr(err)
+
+	r.PrintDiskString("Reconstructed Disk Array", r.DiskArray)
 	output := r.Join(r.DiskArray, length)
-	fmt.Printf("Output: %s \n", output)
+	fmt.Printf("Recovered Output: \n%s \n\n", output)
+
+	err = r.CreateBitFlip(6, 1)
+	raid6.CheckErr(err)
+	r.PrintDiskString("Corrupt Disk Array", r.DiskArray)
+	err = r.ReconstructCorruption()
+	r.PrintDiskString("Reconstructed Disk Array", r.DiskArray)
+	raid6.CheckErr(err)
+
+	err = r.CreateBitFlip(2, 1)
+	r.PrintDiskString("Corrupt Disk Array", r.DiskArray)
+	raid6.CheckErr(err)
+	err = r.ReconstructCorruption()
+	raid6.CheckErr(err)
+
 }
